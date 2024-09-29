@@ -1,1 +1,5 @@
 /target
+.idea
+FONTS.chip8
+diff.py
+test_opcode.ch8

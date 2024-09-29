@@ -1,4 +1,6 @@
-use std::{ops::Shr, panic, time::Duration};
+use std::fs::File;
+use std::io::Write;
+use std::{ops::Shr, panic};
 
 use sdl2::{event::Event, keyboard::Keycode};
 
@@ -6,16 +8,21 @@ mod cpu_const;
 pub mod disasm;
 pub mod options;
 pub mod screen;
+pub mod timers;
 
 pub struct Chip8 {
     pub running: bool,
     wainting: bool,
+    timers: timers::Timers,
     screen: screen::Screen,
     memory: [u8; 4096],
     registers: [u8; 16],
     i: u16,
     pc: usize,
+    last_pc: usize,
     sp: usize,
+    cycles: usize,
+    whole: u16,
 }
 
 impl Chip8 {
@@ -23,12 +30,16 @@ impl Chip8 {
         let mut chip = Chip8 {
             running: true,
             wainting: false,
+            timers: timers::Timers::new(),
             screen: screen::Screen::new(options.scale_factor),
             memory: [0; 4096],
             registers: [0; 16],
             i: 0,
             pc: cpu_const::PC_START,
+            last_pc: 0,
             sp: cpu_const::STACK_POINT_START,
+            cycles: 0,
+            whole: 0,
         };
         let font = include_bytes!("../../FONTS.chip8");
         chip.load_rom(font, 0);
@@ -40,6 +51,7 @@ impl Chip8 {
     pub fn cycle(&mut self) {
         let first_part = self.memory[self.pc];
         let second_part = self.memory[self.pc + 1];
+        self.whole = (first_part as u16) << 8 | second_part as u16;
         let disc_1: u8 = first_part.shr(4);
         let reg_1: u8 = first_part & 0x0F;
         let reg_2: u8 = second_part.shr(4);
@@ -59,6 +71,12 @@ impl Chip8 {
                 _ => {}
             }
         }
+        self.last_pc = self.pc;
+        if !self.wainting {
+            self.pc += 2;
+            self.cycles += 1;
+        }
+        self.timers.update();
         match disc_1 {
             0x00 => self.clear_return(address),
             0x01 => self.jump_to_address(address),
@@ -75,13 +93,23 @@ impl Chip8 {
             0x0C => self.generate_random_number(reg_1, number),
             0x0D => self.draw_sprite(reg_1, reg_2, disc_2),
             0x0E => self.keyboard_routines(reg_1, number),
-            0x0F => self.misc_routines(reg_1, disc_2),
-            _ => panic!("Unsupported instruction"),
+            0x0F => self.misc_routines(reg_1, number),
+            _ => panic!("Unsupported instruction: {:0x}", self.whole),
         }
-        if self.wainting {
-            self.wainting = false;
-        }
-        self.pc += 2;
+    }
+
+    pub fn info_dump(&self) {
+        let ins = disasm::disasm_chip_8_op(&self.memory, self.last_pc);
+        println!(
+            "PC:{:04X} OP:{:04X} CYCLE:{} INS: {}",
+            self.last_pc, self.whole, self.cycles, ins
+        );
+        self.dump(&format!("memdump_{}.bin", self.cycles))
+    }
+
+    pub fn dump(&self, filename: &str) {
+        let mut file = File::create(filename).expect("Unable to create file");
+        file.write_all(&self.memory).expect("Unable to write data");
     }
 
     fn load_rom(&mut self, rom: &[u8], index: usize) {
@@ -105,9 +133,9 @@ impl Chip8 {
         self.pc = address as usize;
     }
     fn call_subroutine(&mut self, address: u16) {
-        self.memory[self.sp] = (self.pc.shr(8)) as u8;
-        self.sp += 1;
         self.memory[self.sp] = self.pc as u8;
+        self.sp += 1;
+        self.memory[self.sp] = (self.pc.shr(8)) as u8;
         self.sp += 1;
         self.pc = address as usize;
     }
@@ -134,6 +162,7 @@ impl Chip8 {
     }
     fn execute_logical_instruction(&mut self, reg_1: u8, reg_2: u8, disc: u8) {
         match disc {
+            0x00 => self.registers[reg_1 as usize] = self.registers[reg_2 as usize],
             0x01 => self.registers[reg_1 as usize] |= self.registers[reg_2 as usize],
             0x02 => self.registers[reg_1 as usize] &= self.registers[reg_2 as usize],
             0x03 => self.registers[reg_1 as usize] ^= self.registers[reg_2 as usize],
@@ -150,7 +179,8 @@ impl Chip8 {
                     } else {
                         0
                     };
-                self.registers[reg_1 as usize] -= self.registers[reg_2 as usize];
+                self.registers[reg_1 as usize] =
+                    self.registers[reg_1 as usize].wrapping_sub(self.registers[reg_2 as usize]);
             }
             0x06 => {
                 self.registers[0xF] = self.registers[reg_1 as usize] & 0x01;
@@ -170,7 +200,7 @@ impl Chip8 {
                 self.registers[0xF] = self.registers[reg_1 as usize] & 0x80;
                 self.registers[reg_1 as usize] <<= 1;
             }
-            _ => panic!("Unsupported instruction"),
+            _ => panic!("Unsupported instruction: {:0x}", self.whole),
         }
     }
     fn skip_if_reg_not_equal_reg(&mut self, reg_1: u8, reg_2: u8) {
@@ -189,6 +219,8 @@ impl Chip8 {
     }
     fn draw_sprite(&mut self, x: u8, y: u8, len: u8) {
         let sprite = &self.memory[self.i as usize..(self.i + len as u16) as usize];
+        let x = self.registers[x as usize];
+        let y = self.registers[y as usize];
         let collision = self.screen.draw(x, y, sprite);
         self.registers[0xF] = if collision { 1 } else { 0 };
     }
@@ -207,7 +239,40 @@ impl Chip8 {
             _ => panic!("Unsupported instruction"),
         }
     }
-    fn misc_routines(&mut self, reg: u8, disc: u8) {}
+    fn misc_routines(&mut self, reg: u8, disc: u8) {
+        match disc {
+            0x07 => self.registers[reg as usize] = self.timers.delay_timer,
+            0x0A => {
+                if self.screen.is_key_pressed(0) {
+                    self.wainting = false;
+                    self.registers[reg as usize] = 0;
+                } else {
+                    self.wainting = true;
+                }
+            }
+            0x15 => self.timers.delay_timer = self.registers[reg as usize],
+            0x18 => self.timers.sound_timer = self.registers[reg as usize],
+            0x1E => self.i += self.registers[reg as usize] as u16,
+            0x29 => self.i = self.registers[reg as usize] as u16 * 5,
+            0x33 => {
+                let value = self.registers[reg as usize];
+                self.memory[self.i as usize] = value / 100;
+                self.memory[self.i as usize + 1] = (value / 10) % 10;
+                self.memory[self.i as usize + 2] = value % 10;
+            }
+            0x55 => {
+                for i in 0..=reg {
+                    self.memory[self.i as usize + i as usize] = self.registers[i as usize];
+                }
+                self.i += reg as u16 + 1;
+            }
+            0x65 => {
+                for i in 0..=reg {
+                    self.registers[i as usize] = self.memory[self.i as usize + i as usize];
+                }
+                self.i += reg as u16 + 1;
+            }
+            _ => panic!("Unsupported instruction: {:0x}", self.whole),
+        }
+    }
 }
-
-impl Chip8 {}
