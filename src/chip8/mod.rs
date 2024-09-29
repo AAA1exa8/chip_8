@@ -1,8 +1,7 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
 use std::{ops::Shr, panic};
-
-use sdl2::{event::Event, keyboard::Keycode};
 
 mod cpu_const;
 pub mod disasm;
@@ -15,6 +14,7 @@ pub struct Chip8 {
     wainting: bool,
     timers: timers::Timers,
     screen: screen::Screen,
+    keys: HashSet<u8>,
     memory: [u8; 4096],
     registers: [u8; 16],
     i: u16,
@@ -32,6 +32,7 @@ impl Chip8 {
             wainting: false,
             timers: timers::Timers::new(),
             screen: screen::Screen::new(options.scale_factor),
+            keys: HashSet::new(),
             memory: [0; 4096],
             registers: [0; 16],
             i: 0,
@@ -58,25 +59,13 @@ impl Chip8 {
         let disc_2: u8 = second_part & 0x0F;
         let address = ((reg_1 as u16) << 8) | (second_part as u16);
         let number = reg_2 << 4 | disc_2;
-        for event in self.screen.get_events() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => {
-                    self.running = false;
-                    break;
-                }
-                _ => {}
-            }
-        }
         self.last_pc = self.pc;
         if !self.wainting {
             self.pc += 2;
             self.cycles += 1;
         }
         self.timers.update();
+        (self.keys, self.running) = self.screen.get_key_state();
         match disc_1 {
             0x00 => self.clear_return(address),
             0x01 => self.jump_to_address(address),
@@ -95,6 +84,9 @@ impl Chip8 {
             0x0E => self.keyboard_routines(reg_1, number),
             0x0F => self.misc_routines(reg_1, number),
             _ => panic!("Unsupported instruction: {:0x}", self.whole),
+        }
+        if self.wainting {
+            self.pc = self.last_pc;
         }
     }
 
@@ -218,7 +210,7 @@ impl Chip8 {
         self.registers[reg as usize] = rand::random::<u8>() & mask;
     }
     fn draw_sprite(&mut self, x: u8, y: u8, len: u8) {
-        let sprite = &self.memory[self.i as usize..(self.i + len as u16) as usize];
+        let sprite = &self.memory[self.i as usize..((self.i as usize) + len as usize)];
         let x = self.registers[x as usize];
         let y = self.registers[y as usize];
         let collision = self.screen.draw(x, y, sprite);
@@ -227,12 +219,12 @@ impl Chip8 {
     fn keyboard_routines(&mut self, reg: u8, disc: u8) {
         match disc {
             0x9E => {
-                if self.screen.is_key_pressed(self.registers[reg as usize]) {
+                if self.keys.contains(&self.registers[reg as usize]) {
                     self.pc += 2;
                 }
             }
             0xA1 => {
-                if !self.screen.is_key_pressed(self.registers[reg as usize]) {
+                if !self.keys.contains(&self.registers[reg as usize]) {
                     self.pc += 2;
                 }
             }
@@ -243,16 +235,16 @@ impl Chip8 {
         match disc {
             0x07 => self.registers[reg as usize] = self.timers.delay_timer,
             0x0A => {
-                if self.screen.is_key_pressed(0) {
+                if let Some(key) = self.keys.iter().next() {
                     self.wainting = false;
-                    self.registers[reg as usize] = 0;
+                    self.registers[reg as usize] = *key;
                 } else {
                     self.wainting = true;
                 }
             }
             0x15 => self.timers.delay_timer = self.registers[reg as usize],
             0x18 => self.timers.sound_timer = self.registers[reg as usize],
-            0x1E => self.i += self.registers[reg as usize] as u16,
+            0x1E => self.i = self.i.wrapping_add(self.registers[reg as usize] as u16),
             0x29 => self.i = self.registers[reg as usize] as u16 * 5,
             0x33 => {
                 let value = self.registers[reg as usize];

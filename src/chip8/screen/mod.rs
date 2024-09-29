@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use sdl2::{
-    event::EventPollIterator, keyboard::Keycode, pixels::Color, rect, render::Canvas,
+    keyboard::Keycode, pixels::Color, render::Canvas,
     video::Window, EventPump,
 };
 
@@ -48,11 +48,6 @@ impl Screen {
         self.canvas.clear();
         self.canvas.present();
     }
-
-    pub fn get_events(&mut self) -> EventPollIterator {
-        self.event_pump.poll_iter()
-    }
-
     pub fn clear(&mut self) {
         self.canvas.set_draw_color(Color::RGB(0, 0, 0));
         self.canvas.clear();
@@ -60,35 +55,53 @@ impl Screen {
         self.pixel_buffer.fill(0);
     }
 
-    pub fn is_key_pressed(&mut self, key: u8) -> bool {
-        let sdl_key = match key {
-            0x0 => Keycode::X,
-            0x1 => Keycode::Num1,
-            0x2 => Keycode::Num2,
-            0x3 => Keycode::Num3,
-            0x4 => Keycode::Q,
-            0x5 => Keycode::W,
-            0x6 => Keycode::E,
-            0x7 => Keycode::A,
-            0x8 => Keycode::S,
-            0x9 => Keycode::D,
-            0xA => Keycode::Z,
-            0xB => Keycode::C,
-            0xC => Keycode::Num4,
-            0xD => Keycode::R,
-            0xE => Keycode::F,
-            0xF => Keycode::V,
-            _ => return false,
-        };
+    pub fn get_key_state(&mut self) -> (HashSet<u8>, bool) {
+        let mut keys = HashSet::new();
+        let mut run = true;
 
-        let keys: HashSet<Keycode> = self
+        for event in self.event_pump.poll_iter() {
+            match event {
+                sdl2::event::Event::Quit { .. } => run = false,
+                sdl2::event::Event::KeyDown {
+                    keycode: Some(key), ..
+                } => match key {
+                    Keycode::Escape => run = false,
+                    _ => continue,
+                },
+                _ => continue,
+            }
+        }
+
+        let pushed_keys: Vec<Keycode> = self
             .event_pump
             .keyboard_state()
             .pressed_scancodes()
             .filter_map(Keycode::from_scancode)
             .collect();
 
-        keys.contains(&sdl_key)
+        for key in pushed_keys {
+            match key {
+                Keycode::Num1 => keys.insert(0x1),
+                Keycode::Num2 => keys.insert(0x2),
+                Keycode::Num3 => keys.insert(0x3),
+                Keycode::Num4 => keys.insert(0xC),
+                Keycode::Q => keys.insert(0x4),
+                Keycode::W => keys.insert(0x5),
+                Keycode::E => keys.insert(0x6),
+                Keycode::R => keys.insert(0xD),
+                Keycode::A => keys.insert(0x7),
+                Keycode::S => keys.insert(0x8),
+                Keycode::D => keys.insert(0x9),
+                Keycode::F => keys.insert(0xE),
+                Keycode::Z => keys.insert(0xA),
+                Keycode::X => keys.insert(0x0),
+                Keycode::C => keys.insert(0xB),
+                Keycode::V => keys.insert(0xF),
+                _ => false,
+            };
+        }
+
+        (keys, run)
     }
 
     pub fn draw(&mut self, x_start: u8, y_start: u8, sprite: &[u8]) -> bool {
